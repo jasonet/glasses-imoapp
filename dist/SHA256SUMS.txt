@@ -1,0 +1,2 @@
+750214c15e669f2f241deb6c44a673a2eeacd3db9aad6ec21dd8478ba81f4347  INMO-Card-Lab-0.1-debug.apk
+bfa17bbafa1b179b30b35222ff59d6ebdf30cb6377e55d599d60f03c13c76039  INMO-Card-Lab-0.1-source.zip
