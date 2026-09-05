@@ -1,0 +1,25 @@
+name: Bootstrap 0.1 source
+
+on:
+  push:
+    paths:
+      - INMO-Card-Lab-0.1-source.zip
+
+permissions:
+  contents: write
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import source archive
+        run: |
+          unzip -o INMO-Card-Lab-0.1-source.zip
+          mkdir -p dist
+          mv INMO-Card-Lab-0.1-source.zip dist/
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add -A
+          git commit -m "Import INMO Card Lab 0.1 source"
+          git push
