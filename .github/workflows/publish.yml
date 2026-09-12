@@ -1,0 +1,64 @@
+name: Publish packaged minor release
+
+on:
+  push:
+    branches: [main]
+    paths: ['dist/SHA256SUMS-*.txt']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: packaged-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Determine next minor version and verify artifacts
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous=$(gh release view --json tagName --jq .tagName)
+          [[ "$previous" =~ ^v([0-9]+)\.([0-9]+)$ ]]
+          version="${BASH_REMATCH[1]}.$((10#${BASH_REMATCH[2]} + 1))"
+          echo "Publishing v$version after $previous"
+          cd dist
+          sha256sum --check "SHA256SUMS-$version.txt"
+          test -f "INMO-Card-Lab-$version-debug.apk"
+          test -f "INMO-Card-Lab-$version-source.zip"
+          echo "number=$version" >> "$GITHUB_OUTPUT"
+      - name: Import verified source
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -o "dist/INMO-Card-Lab-$RELEASE_VERSION-source.zip"
+          grep -F "versionName = \"$RELEASE_VERSION\"" app/build.gradle.kts
+          test -f "RELEASE_NOTES_$RELEASE_VERSION.md"
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add app gradle gradlew gradlew.bat .gitignore README.md CORE_FEATURE_PROMPT.md RELEASE_NOTES_*.md build.gradle.kts settings.gradle.kts gradle.properties
+          if ! git diff --cached --quiet; then
+            git commit -m "Release INMO Card Lab $RELEASE_VERSION source"
+            git push origin HEAD:main
+          fi
+      - name: Publish release and attachments
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "v$RELEASE_VERSION" \
+            --target "$(git rev-parse HEAD)" \
+            --title "INMO Card Lab $RELEASE_VERSION" \
+            --notes-file "RELEASE_NOTES_$RELEASE_VERSION.md" \
+            "dist/INMO-Card-Lab-$RELEASE_VERSION-debug.apk" \
+            "dist/INMO-Card-Lab-$RELEASE_VERSION-source.zip" \
+            "dist/SHA256SUMS-$RELEASE_VERSION.txt"
