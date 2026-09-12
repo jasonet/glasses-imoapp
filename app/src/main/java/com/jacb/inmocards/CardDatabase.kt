@@ -5,7 +5,8 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
-class CardDatabase(context: Context) : SQLiteOpenHelper(context, "inmo_cards.db", null, 1) {
+class CardDatabase(context: Context, name: String = "inmo_cards.db") :
+    SQLiteOpenHelper(context, name, null, 2) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """
@@ -13,6 +14,7 @@ class CardDatabase(context: Context) : SQLiteOpenHelper(context, "inmo_cards.db"
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at INTEGER NOT NULL,
                 deck_count INTEGER NOT NULL,
+                game_mode TEXT NOT NULL DEFAULT 'BLACKJACK',
                 active INTEGER NOT NULL DEFAULT 1
             )
             """.trimIndent()
@@ -30,16 +32,23 @@ class CardDatabase(context: Context) : SQLiteOpenHelper(context, "inmo_cards.db"
         )
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE sessions ADD COLUMN game_mode TEXT NOT NULL DEFAULT 'BLACKJACK'")
+        }
+    }
 
-    fun activeSessionId(): Long {
+    fun activeSession(): ShoeSession {
         readableDatabase.rawQuery(
-            "SELECT id FROM sessions WHERE active = 1 ORDER BY id DESC LIMIT 1",
+            "SELECT id, deck_count, game_mode FROM sessions WHERE active = 1 ORDER BY id DESC LIMIT 1",
             null
         ).use { cursor ->
-            if (cursor.moveToFirst()) return cursor.getLong(0)
+            if (cursor.moveToFirst()) return ShoeSession(
+                cursor.getLong(0),
+                ShoeConfig(GameMode.valueOf(cursor.getString(2)), cursor.getInt(1))
+            )
         }
-        return createSession()
+        return resetSession(ShoeConfig())
     }
 
     fun loadRanks(sessionId: Long): List<CardRank> {
@@ -75,17 +84,26 @@ class CardDatabase(context: Context) : SQLiteOpenHelper(context, "inmo_cards.db"
         }
     }
 
-    fun resetSession(): Long {
-        writableDatabase.update("sessions", ContentValues().apply { put("active", 0) }, "active = 1", null)
-        return createSession()
+    fun resetSession(config: ShoeConfig): ShoeSession {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.update("sessions", ContentValues().apply { put("active", 0) }, "active = 1", null)
+            val id = createSession(db, config)
+            db.setTransactionSuccessful()
+            return ShoeSession(id, config)
+        } finally {
+            db.endTransaction()
+        }
     }
 
-    private fun createSession(): Long = writableDatabase.insertOrThrow(
+    private fun createSession(db: SQLiteDatabase, config: ShoeConfig): Long = db.insertOrThrow(
         "sessions",
         null,
         ContentValues().apply {
             put("started_at", System.currentTimeMillis())
-            put("deck_count", 2)
+            put("deck_count", config.decks)
+            put("game_mode", config.mode.name)
             put("active", 1)
         }
     )

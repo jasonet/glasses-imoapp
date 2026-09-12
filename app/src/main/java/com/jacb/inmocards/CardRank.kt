@@ -29,3 +29,5 @@ fun CardRank.group(): RankGroup = when (this) {
     CardRank.SEVEN, CardRank.EIGHT, CardRank.NINE -> RankGroup.NEUTRAL
     CardRank.TEN, CardRank.JACK, CardRank.QUEEN, CardRank.KING -> RankGroup.TEN_VALUE
 }
+
+fun CardRank.baccaratValue(): Int = if (ordinal >= CardRank.TEN.ordinal) 0 else ordinal + 1

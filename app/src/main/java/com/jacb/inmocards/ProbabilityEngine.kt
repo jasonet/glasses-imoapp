@@ -15,14 +15,15 @@ data class BlackjackChances(
 
 class ProbabilityEngine(
     seenRanks: List<CardRank> = emptyList(),
-    private val decks: Int = 2
+    val decks: Int = 2
 ) {
     private val initialPerRank = decks * 4
     private val remaining = CardRank.entries.associateWith { initialPerRank }.toMutableMap()
 
     init {
+        require(decks in listOf(2, 4, 6, 8)) { "Unsupported deck count: $decks" }
         seenRanks.forEach { rank ->
-            if ((remaining[rank] ?: 0) > 0) remaining[rank] = remaining.getValue(rank) - 1
+            require(record(rank)) { "Recorded shoe exceeds rank capacity: ${rank.label}" }
         }
     }
 
@@ -33,6 +34,10 @@ class ProbabilityEngine(
         get() = decks * 52 - totalRemaining
 
     fun remaining(rank: CardRank): Int = remaining.getValue(rank)
+
+    fun baccaratCounts(): IntArray = IntArray(10).also { counts ->
+        remaining.forEach { (rank, count) -> counts[rank.baccaratValue()] += count }
+    }
 
     fun record(rank: CardRank): Boolean {
         val count = remaining.getValue(rank)

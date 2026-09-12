@@ -17,25 +17,42 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AlertDialog
 import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import java.text.NumberFormat
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
     private lateinit var database: CardDatabase
     private var sessionId = 0L
+    private var config = ShoeConfig()
     private lateinit var engine: ProbabilityEngine
     private lateinit var stabilizer: RankStabilizer
     private lateinit var analyzer: CardAnalyzer
     private lateinit var cameraExecutor: ExecutorService
     private var cameraProvider: ProcessCameraProvider? = null
+    private val probabilityExecutor = ThreadPoolExecutor(
+        1, 1, 0L, TimeUnit.MILLISECONDS, LinkedBlockingQueue<Runnable>()
+    )
+    private var probabilityTask: Future<*>? = null
+    private var probabilityGeneration = 0L
+    @Volatile private var detectionGeneration = 0L
+    private var configurationOpen = false
+    private var destroyed = false
 
     private lateinit var previewView: PreviewView
     private lateinit var guideView: DetectionGuideView
@@ -49,6 +66,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var aceText: TextView
     private lateinit var powerButton: Button
     private lateinit var pauseButton: Button
+    private lateinit var configButton: Button
+    private lateinit var modeHint: TextView
     private val rankViews = mutableListOf<TextView>()
 
     private var showPreview = true
@@ -72,12 +91,21 @@ class MainActivity : AppCompatActivity() {
             )
 
         database = CardDatabase(this)
-        sessionId = database.activeSessionId()
-        engine = ProbabilityEngine(database.loadRanks(sessionId))
+        val session = database.activeSession()
+        sessionId = session.id
+        config = session.config
+        engine = ProbabilityEngine(database.loadRanks(sessionId), config.decks)
         cameraExecutor = Executors.newSingleThreadExecutor()
         analyzer = CardAnalyzer(
-            onRank = { rank -> runOnUiThread { stabilizer.offer(rank) } },
-            onError = { error -> runOnUiThread { setStatus("识别错误: ${error.message}", COLOR_ERROR) } }
+            onRank = { rank ->
+                val generation = detectionGeneration
+                runOnUiThread {
+                    if (generation == detectionGeneration && canObserve()) stabilizer.offer(rank)
+                }
+            },
+            onError = { error -> runOnUiThread {
+                if (canObserve()) setStatus("识别错误: ${error.message}", COLOR_ERROR)
+            } }
         )
         stabilizer = RankStabilizer(
             onConfirmed = ::recordRank,
@@ -119,12 +147,17 @@ class MainActivity : AppCompatActivity() {
         statusDot = text("●", 24f, COLOR_READY, Gravity.CENTER)
         currentRank = text("--", 42f, Color.WHITE, Gravity.CENTER)
         statusText = text("启动相机…", 17f, Color.WHITE, Gravity.START)
-        counterText = text("104/104", 18f, COLOR_MUTED, Gravity.END)
+        counterText = text("--", 18f, COLOR_MUTED, Gravity.END)
         header.addView(statusDot, LinearLayout.LayoutParams(dp(42), dp(52)))
         header.addView(currentRank, LinearLayout.LayoutParams(dp(92), dp(52)))
         header.addView(statusText, LinearLayout.LayoutParams(0, dp(52), 1f))
         header.addView(counterText, LinearLayout.LayoutParams(dp(130), dp(52)))
         dashboard.addView(header, LinearLayout.LayoutParams(-1, dp(52)))
+
+        configButton = button("${config.label} · 选择玩法/副数") { chooseShoe() }
+        dashboard.addView(configButton, LinearLayout.LayoutParams(-1, dp(36)))
+        modeHint = text("", 13f, COLOR_MUTED, Gravity.CENTER)
+        dashboard.addView(modeHint, LinearLayout.LayoutParams(-1, dp(32)))
 
         val groups = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         lowText = groupText("● 低 2-6", COLOR_LOW)
@@ -181,11 +214,13 @@ class MainActivity : AppCompatActivity() {
     private fun initializeCamera() {
         val providerFuture = ProcessCameraProvider.getInstance(this)
         providerFuture.addListener({
+            if (destroyed) return@addListener
             cameraProvider = providerFuture.get()
             bindCamera()
         }, ContextCompat.getMainExecutor(this))
     }
 
+    @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
     private fun bindCamera() {
         val provider = cameraProvider ?: return
         provider.unbindAll()
@@ -220,37 +255,90 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun recordRank(rank: CardRank) {
-        if (!engine.record(rank)) {
+        if (engine.remaining(rank) <= 0) {
             setStatus("${rank.label} 已全部出现", COLOR_ERROR)
             return
         }
-        database.record(sessionId, rank)
+        try {
+            database.record(sessionId, rank)
+        } catch (error: Exception) {
+            setStatus("记录失败，请移开后重试", COLOR_ERROR)
+            return
+        }
+        engine.record(rank)
         currentRank.text = rank.label
         setStatus("已记录 ${rank.label}，请移开", COLOR_CONFIRMED)
         renderProbabilities()
     }
 
     private fun undoLast() {
-        val rank = database.undoLast(sessionId)
+        val rank = try {
+            database.undoLast(sessionId)
+        } catch (error: Exception) {
+            setStatus("撤销失败，请重试", COLOR_ERROR)
+            return
+        }
         if (rank == null) {
             Toast.makeText(this, "没有可撤销的记录", Toast.LENGTH_SHORT).show()
             return
         }
         engine.undo(rank)
+        detectionGeneration++
         currentRank.text = "↶${rank.label}"
         stabilizer.reset()
         renderProbabilities()
         setStatus("已撤销 ${rank.label}", COLOR_ACE)
     }
 
-    private fun resetSession() {
-        sessionId = database.resetSession()
-        engine = ProbabilityEngine()
+    private fun resetSession(nextConfig: ShoeConfig = config) {
+        val session = try {
+            database.resetSession(nextConfig)
+        } catch (error: Exception) {
+            setStatus("新牌靴保存失败", COLOR_ERROR)
+            return
+        }
+        sessionId = session.id
+        config = session.config
+        engine = ProbabilityEngine(decks = config.decks)
+        detectionGeneration++
+        configButton.text = "${config.label} · 选择玩法/副数"
         currentRank.text = "--"
         stabilizer.reset()
         renderProbabilities()
-        setStatus("新牌靴：两副牌", COLOR_CONFIRMED)
+        setStatus("新牌靴：${config.label}", COLOR_CONFIRMED)
     }
+
+    private fun chooseShoe() {
+        if (configurationOpen) return
+        configurationOpen = true
+        detectionGeneration++
+        stabilizer.reset()
+        val presets = ShoeConfig.presets
+        var selected = presets.indexOf(config)
+        val labels = presets.map { preset ->
+            when {
+                preset == ShoeConfig() -> "${preset.label}（默认）"
+                preset.mode == GameMode.BACCARAT && preset.decks < 6 -> "${preset.label}（模拟）"
+                preset.mode == GameMode.BACCARAT && preset.decks == 8 -> "${preset.label}（澳门8副参考）"
+                else -> preset.label
+            }
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("选择后新开牌靴；历史记录保留")
+            .setSingleChoiceItems(labels, selected) { _, which -> selected = which }
+            .setNegativeButton("取消", null)
+            .setPositiveButton("新开牌靴") { _, _ -> resetSession(presets[selected]) }
+            .setOnDismissListener {
+                configurationOpen = false
+                detectionGeneration++
+                stabilizer.reset()
+                if (paused) setStatus("相机已关闭", COLOR_PAUSED)
+            }
+            .show()
+    }
+
+    private fun canObserve(): Boolean = !destroyed && !paused && !configurationOpen &&
+        lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
 
     private fun togglePreview() {
         showPreview = !showPreview
@@ -260,6 +348,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun togglePause() {
+        detectionGeneration++
         paused = !paused
         pauseButton.text = if (paused) "恢复相机" else "暂停相机"
         if (paused) {
@@ -274,17 +363,58 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderProbabilities() {
-        val formatter = NumberFormat.getPercentInstance().apply { maximumFractionDigits = 1 }
+        probabilityGeneration++
+        val generation = probabilityGeneration
+        probabilityTask?.cancel(true)
+        probabilityExecutor.purge()
+        val formatter = NumberFormat.getPercentInstance().apply { maximumFractionDigits = 2 }
         val chances = engine.rankChances()
         chances.forEachIndexed { index, chance ->
             rankViews[index].text = "${chance.rank.label}  ${chance.remaining}\n${formatter.format(chance.probability)}"
         }
-        val groups = engine.blackjackChances()
-        lowText.text = "● 低  ${formatter.format(groups.low)}"
-        neutralText.text = "● 中  ${formatter.format(groups.neutral)}"
-        tenValueText.text = "● 十点  ${formatter.format(groups.tenValue)}"
-        aceText.text = "● A  ${formatter.format(groups.ace)}"
         counterText.text = "余 ${engine.totalRemaining}  已出 ${engine.seenCount}"
+        if (config.mode == GameMode.BLACKJACK) {
+            val groups = engine.blackjackChances()
+            lowText.text = "低 ${formatter.format(groups.low)}"
+            neutralText.text = "中 ${formatter.format(groups.neutral)}"
+            tenValueText.text = "十点 ${formatter.format(groups.tenValue)}"
+            aceText.text = "A ${formatter.format(groups.ace)}"
+            modeHint.text = "下一张：低2-6 / 中7-9 / 十点10JQK / A · 下方13牌面排序"
+            return
+        }
+
+        lowText.text = "庄 --"
+        neutralText.text = "闲 --"
+        tenValueText.text = "和 --"
+        val counts = engine.baccaratCounts()
+        val total = engine.totalRemaining
+        aceText.text = "零点 ${formatter.format(if (total > 0) counts[0].toDouble() / total else 0.0)}"
+        modeHint.text = "庄闲和：下一完整局计算中 · 零点/下方牌面：下一张"
+        // Cancel superseded calculations and never apply a result to a newer observation/session.
+        probabilityTask = probabilityExecutor.submit {
+            try {
+                val result = BaccaratEngine().calculate(counts)
+                runOnUiThread {
+                    if (destroyed || generation != probabilityGeneration) return@runOnUiThread
+                    if (result == null) {
+                        modeHint.text = "不足6张，请重开牌靴 · 下方仍为下一张牌面概率"
+                    } else {
+                        lowText.text = "庄 ${formatter.format(result.banker)}"
+                        neutralText.text = "闲 ${formatter.format(result.player)}"
+                        tenValueText.text = "和 ${formatter.format(result.tie)}"
+                        modeHint.text = "庄闲和：剩余牌发下一完整局（非当前手牌）· 零点/牌面：下一张"
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                // A newer shoe snapshot owns the display.
+            } catch (error: Exception) {
+                runOnUiThread {
+                    if (!destroyed && generation == probabilityGeneration) {
+                        modeHint.text = "整局概率计算失败 · 下一张牌面概率仍可用"
+                    }
+                }
+            }
+        }
     }
 
     private fun setStatus(message: String, color: Int) {
@@ -305,7 +435,7 @@ class MainActivity : AppCompatActivity() {
         setPadding(dp(4), dp(2), dp(4), dp(2))
     }
 
-    private fun groupText(label: String, color: Int) = text(label, 20f, color, Gravity.CENTER).apply {
+    private fun groupText(label: String, color: Int) = text(label, 17f, color, Gravity.CENTER).apply {
         setBackgroundColor(Color.argb(160, 0, 0, 0))
     }
 
@@ -326,6 +456,11 @@ class MainActivity : AppCompatActivity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     override fun onDestroy() {
+        destroyed = true
+        detectionGeneration++
+        probabilityGeneration++
+        probabilityTask?.cancel(true)
+        probabilityExecutor.shutdownNow()
         cameraProvider?.unbindAll()
         analyzer.close()
         cameraExecutor.shutdown()

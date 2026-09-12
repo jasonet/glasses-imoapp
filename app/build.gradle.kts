@@ -11,8 +11,8 @@ android {
         applicationId = "com.jacb.inmocards"
         minSdk = 26
         targetSdk = 28
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -39,6 +39,11 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    lint {
+        // Sideloaded Air2 prototype deliberately targets its Android 9 firmware, not Google Play.
+        disable += "ExpiredTargetSdkVersion"
+    }
 }
 
 dependencies {
@@ -53,4 +58,6 @@ dependencies {
     implementation("androidx.camera:camera-view:$cameraX")
 
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }
