@@ -22,6 +22,8 @@ INMO Card Lab explores how smart glasses can make the mathematics of classic car
 
 Built for controlled simulations, game-design workshops, and wearable interface research, this is an early engineering prototype. It recognizes **one card corner at a time inside a central guide**, rather than automatically interpreting an entire table.
 
+![AR Glasses Prototype](docs/images/crystal-optech-shows-lumus-ar-glasses-v0-fvg1rdmtaaph1.webp)
+
 ## Experience Scenarios
 
 | Setting | The experience | Research focus |
